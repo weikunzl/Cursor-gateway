@@ -51,6 +51,7 @@ content.
 """
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -83,6 +84,116 @@ class ParsedToolCall:
 
     name: str
     arguments: Dict[str, Any]
+
+
+def _feed_claude_code_tool_calls(
+    buffer: str,
+) -> Tuple[str, List[str], List[Dict[str, Any]]]:
+    """Streaming-safe extraction of ``[Tool Call: Name({...})]`` blocks.
+
+    Returns:
+        Tuple of ``(remaining_buffer, text_parts, tool_dicts)``. Text parts
+        are safe to emit immediately. The remaining buffer may contain a
+        partial ``[Tool Call:...`` prefix that will be completed after more
+        chunks arrive.
+    """
+    tools: List[Dict[str, Any]] = []
+    text_parts: List[str] = []
+
+    # Only attempt extraction when we see an opening marker.
+    if _TOOL_CALL_PREFIX not in buffer:
+        # The buffer might still contain DeepSeek markers that need Phase 2
+        # processing.  Only hold back a trailing partial [Tool Call: prefix;
+        # return the rest to the buffer for the next phase.
+        safe, held = _holdback_cc_prefix(buffer)
+        # But we must not emit deep-seek markers as text — return them to
+        # the buffer so Phase 2 can consume them.
+        if held:
+            # Partial prefix held back; everything before it goes back.
+            # But we don't know where the CC prefix starts — the holdback
+            # logic from _holdback_cc_prefix only checks the tail.
+            # Actually just keep the buffer intact except for the holdback.
+            return held, text_parts, tools
+        else:
+            # No partial CC prefix — whole buffer is safe from CC perspective.
+            # Return it as-is for Phase 2 (DeepSeek) processing.
+            return buffer, text_parts, tools
+
+    # Find every occurrence of the marker and process complete tool calls
+    # that sit before the last (potentially partial) marker.
+    #
+    # Strategy: repeatedly find the first occurrence. If the text between
+    # it and the end of the buffer contains a complete ``[Tool Call: ...]]``,
+    # extract it. Otherwise hold back from that marker onward.
+    pos = 0
+    out_parts: List[str] = []
+
+    while True:
+        marker_idx = buffer.find(_TOOL_CALL_PREFIX, pos)
+        if marker_idx == -1:
+            # No more markers; rest is safe (with holdback for partial prefix).
+            remaining = buffer[pos:]
+            safe, held = _holdback_cc_prefix(remaining)
+            if safe:
+                out_parts.append(safe)
+            if out_parts:
+                text_parts.append("".join(out_parts))
+            return held, text_parts, tools
+
+        # Emit text before the marker.
+        if marker_idx > pos:
+            prefix = buffer[pos:marker_idx]
+            safe, held = _holdback_cc_prefix(prefix)
+            if safe:
+                out_parts.append(safe)
+            if held:
+                # Partial prefix — hold back from here.
+                candidate = held + buffer[marker_idx:]
+                if out_parts:
+                    text_parts.append("".join(out_parts))
+                return candidate, text_parts, tools
+
+        # Try to extract a complete tool call starting at marker_idx.
+        suffix = buffer[marker_idx:]
+        cleaned, extracted = _extract_claude_code_tool_calls(suffix)
+        if extracted:
+            # Got a complete tool call! Emit any preceding text from
+            # `cleaned` and advance past it.
+            tools.extend(extracted)
+            pos = marker_idx + len(suffix) - len(cleaned)
+            continue
+
+        # Not a complete tool call yet — hold the suffix for more chunks.
+        if out_parts:
+            text_parts.append("".join(out_parts))
+        return suffix, text_parts, tools
+
+
+def _holdback_cc_prefix(data: str) -> Tuple[str, str]:
+    """Hold back a suffix that may be the start of ``[Tool Call:``.
+
+    Also holds back the entire buffer if it contains a ``[Tool Call:`` marker
+    that has not been completed yet (no closing ``)]`` found).
+    """
+    if not data:
+        return "", ""
+
+    marker = _TOOL_CALL_PREFIX
+
+    # If the buffer contains [Tool Call: but no complete tool call is found,
+    # hold everything back.
+    if marker in data:
+        _, extracted = _extract_claude_code_tool_calls(data)
+        if not extracted:
+            # Incomplete tool call — hold the whole buffer.
+            return "", data
+
+    # Also guard against trailing prefixes of the marker.
+    for prefix_len in range(min(len(marker), len(data)), 0, -1):
+        if data.endswith(marker[:prefix_len]):
+            return data[:-prefix_len], data[-prefix_len:]
+
+    return data, ""
 
 
 def _holdback_suffix(data: str) -> Tuple[str, str]:
@@ -302,20 +413,113 @@ def _parse_tool_calls_block(block: str) -> List[ParsedToolCall]:
     return tools
 
 
+# Regex to extract [Tool Call: Name({...})] blocks from composable model output.
+# Claude Code SDK embeds tool calls in this format; composer-2.5 may return them
+# as plain text inside the thinking/content stream rather than as structured
+# protobuf fields.
+_TOOL_CALL_RE = re.compile(
+    r"\[Tool Call:\s+(\w+)\s*\(",  # "[Tool Call: Name("
+)
+
+
+def _extract_claude_code_tool_calls(text: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """Extract and remove ``[Tool Call: Name({...})]`` blocks from text.
+
+    These blocks appear in composer-2.5 output when the model is simulating
+    Claude Code's internal tool-call format. We lift them into structured
+    tool-use dicts so downstream clients see proper Anthropic tool_use blocks
+    rather than raw markup.
+
+    Returns:
+        Tuple of ``(cleaned_text, tool_dicts)``.
+    """
+    tools: List[Dict[str, Any]] = []
+    cleaned_parts: List[str] = []
+    pos = 0
+
+    for m in _TOOL_CALL_RE.finditer(text):
+        name = m.group(1)
+        start = m.start()
+        body_start = m.end()
+
+        # Emit everything before this marker
+        if start > pos:
+            cleaned_parts.append(text[pos:start])
+
+        # Try to find the matching closing bracket: ] preceded by )
+        # Format: [Tool Call: Name({...json...})]
+        # We need balanced-bracket matching within the JSON payload.
+        depth = 0
+        in_string = False
+        escape_next = False
+        end_idx = -1
+
+        for i, ch in enumerate(text[body_start:], start=body_start):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\':
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+            elif ch == ')':
+                # Look ahead for ]
+                if depth == 0 and i + 1 < len(text) and text[i + 1] == ']':
+                    end_idx = i + 2  # skip both )]
+                    break
+
+        if end_idx == -1:
+            # Unterminated; treat as plain text.
+            pos = start
+            break
+
+        json_part = text[body_start:end_idx - 2]  # strip trailing )]
+        args: Dict[str, Any] = {}
+        try:
+            parsed = json.loads(json_part)
+            if isinstance(parsed, dict):
+                args = parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        tools.append({"name": name, "arguments": args})
+        pos = end_idx
+
+    if pos < len(text):
+        cleaned_parts.append(text[pos:])
+
+    return "".join(cleaned_parts).strip(), tools
+
+
 def extract_redacted_tool_calls(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     """
     Remove DeepSeek tool-call markup from ``text`` and return structured calls.
 
     Args:
         text: Assistant visible text that may carry one or more
-            ``<｜tool▁calls▁begin｜>...<｜tool▁calls▁end｜>`` envelopes.
+            ``<｜tool▁calls▁begin｜>...<｜tool▁calls▁end｜>`` envelopes
+            or ``[Tool Call: Name({...})]`` blocks.
 
     Returns:
         Tuple of ``(cleaned_text, tool_dicts)``. Each tool dict has the
         shape ``{"name": str, "arguments": dict}``. If no markers are found
         the input text is returned unchanged.
     """
+    # Phase 1: extract [Tool Call: xxx({...})] blocks (Claude Code / composer-2.5 format)
+    text, claude_code_tools = _extract_claude_code_tool_calls(text)
+
+    # Phase 2: extract <｜tool▁calls▁begin｜>... blocks (DeepSeek format)
     if TOOL_CALLS_BEGIN not in text:
+        if claude_code_tools:
+            return text, claude_code_tools
         return text, []
 
     cleaned_parts: List[str] = []
@@ -350,14 +554,20 @@ def extract_redacted_tool_calls(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     return cleaned, tools
 
 
+# Marker that may indicate the start of a [Tool Call: ...] block.
+_TOOL_CALL_PREFIX = "[Tool Call:"
+
+
 class RedactedToolStreamProcessor:
     """
-    Incrementally extract DeepSeek tool calls from streamed assistant text.
+    Incrementally extract DeepSeek and Claude Code tool calls from streamed
+    assistant text.
 
     The processor emits safe text prefixes immediately and buffers any
-    in-progress tool-call envelope until its closing marker arrives. Partial
-    marker characters at the end of a chunk are held back so a marker split
-    across chunk boundaries is still recognised once the next chunk arrives.
+    in-progress tool-call envelope or ``[Tool Call: ...`` prefix until the
+    closing marker arrives. Partial marker characters at the end of a chunk
+    are held back so a marker split across chunk boundaries is still
+    recognised once the next chunk arrives.
     """
 
     def __init__(self) -> None:
@@ -382,11 +592,30 @@ class RedactedToolStreamProcessor:
         text_out: List[str] = []
         tools_out: List[Dict[str, Any]] = []
 
+        # Phase 1: handle [Tool Call: Name({...})] blocks (composer-2.5 format).
+        # This must happen before DeepSeek marker processing and before the
+        # holdback logic, otherwise partial [Tool Call: prefixes get emitted
+        # as text prematurely.
+        self._buffer, text_parts, cc_tools = _feed_claude_code_tool_calls(
+            self._buffer
+        )
+        if text_parts:
+            text_out.extend(text_parts)
+        tools_out.extend(cc_tools)
+
+        # Phase 2: handle <｜tool▁calls▁begin｜> blocks (DeepSeek format)
         while TOOL_CALLS_BEGIN in self._buffer:
             begin_idx = self._buffer.find(TOOL_CALLS_BEGIN)
             prefix = self._buffer[:begin_idx]
             if prefix:
-                text_out.append(prefix)
+                # Run the prefix through CC tool-call extraction first, since
+                # it may contain [Tool Call: ...] preceding DeepSeek markers.
+                prefix, prefix_parts, prefix_tools = _feed_claude_code_tool_calls(prefix)
+                if prefix_parts:
+                    text_out.extend(prefix_parts)
+                tools_out.extend(prefix_tools)
+                if prefix:
+                    text_out.append(prefix)
 
             self._buffer = self._buffer[begin_idx:]
             end_idx = self._buffer.find(TOOL_CALLS_END)
@@ -399,13 +628,32 @@ class RedactedToolStreamProcessor:
             _, parsed = extract_redacted_tool_calls(segment)
             tools_out.extend(parsed)
 
-        if TOOL_CALLS_BEGIN not in self._buffer:
-            safe, held = _holdback_suffix(self._buffer)
-            if safe:
-                text_out.append(safe)
-            self._buffer = held
+        # Phase 3: hold back partial markers from the buffer tail.
+        #
+        # Three cases to handle:
+        # 1. Partial [Tool Call: prefix → CC-aware holdback
+        # 2. Partial DeepSeek marker (<｜tool...) at tail → DS holdback
+        # 3. TOOL_CALLS_BEGIN present but TOOL_CALLS_END absent → hold everything
+        if (TOOL_CALLS_BEGIN in self._buffer and
+                TOOL_CALLS_END not in self._buffer):
+            # Unterminated DeepSeek envelope — hold the entire buffer.
+            # Don't emit anything.
+            pass
+        else:
+            safe_cc, held_cc = _holdback_cc_prefix(self._buffer)
+            if held_cc:
+                if safe_cc:
+                    text_out.append(safe_cc)
+                self._buffer = held_cc
+            else:
+                safe, held = _holdback_suffix(self._buffer)
+                if safe:
+                    text_out.append(safe)
+                self._buffer = held
 
-        return "".join(text_out), tools_out
+        # Emit text that definitely has no tool markers in it.
+        final_text = "".join(text_out)
+        return final_text, tools_out
 
     def flush(self) -> Tuple[str, List[Dict[str, Any]]]:
         """
