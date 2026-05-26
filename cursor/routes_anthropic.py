@@ -22,6 +22,7 @@ from cursor.converters_anthropic import anthropic_to_cursor
 from cursor.streaming_anthropic import stream_cursor_to_anthropic, collect_anthropic_response
 from cursor.http_client import CursorHttpClient
 from cursor.utils import generate_conversation_id
+from cursor.tokenizer import count_message_tokens, count_tools_tokens, count_tokens
 
 
 # --- Security ---
@@ -44,6 +45,48 @@ async def verify_anthropic_api_key(
 
 
 router = APIRouter(tags=["Anthropic API"])
+
+
+@router.post("/v1/messages/count_tokens", dependencies=[Depends(verify_anthropic_api_key)])
+async def count_tokens_endpoint(
+    request: Request,
+    request_data: AnthropicMessagesRequest,
+    anthropic_version: Optional[str] = Header(None, alias="anthropic-version"),
+):
+    """
+    Anthropic Messages API — count_tokens endpoint (beta).
+
+    Estimates the number of input tokens the request would consume
+    without actually running the model.
+    """
+    model_resolver: ModelResolver = request.app.state.model_resolver
+    resolved_model = model_resolver.resolve(request_data.model)
+
+    # Count tokens for messages
+    messages_for_count = [msg.model_dump() for msg in request_data.messages]
+    messages_tokens = count_message_tokens(messages_for_count)
+
+    # Count tokens for tools
+    tools_tokens = 0
+    if request_data.tools:
+        tools_for_count = [t.model_dump() for t in request_data.tools]
+        tools_tokens = count_tools_tokens(tools_for_count)
+
+    # Count tokens for system prompt
+    system_tokens = 0
+    if request_data.system:
+        if isinstance(request_data.system, str):
+            system_tokens = count_tokens(request_data.system)
+        elif isinstance(request_data.system, list):
+            system_text = ""
+            for block in request_data.system:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    system_text += block.get("text", "")
+            system_tokens = count_tokens(system_text)
+
+    total = messages_tokens + tools_tokens + system_tokens
+
+    return JSONResponse(content={"input_tokens": total})
 
 
 @router.post("/v1/messages", dependencies=[Depends(verify_anthropic_api_key)])
