@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "ones-test": {
+      "url": "http://10.4.27.111:30011/mcp"
+    }
+  }
+}

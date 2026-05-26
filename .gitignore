@@ -7,6 +7,10 @@
 .idea/
 .shard/
 
+# macOS
+.DS_Store
+__MACOSX/
+
 # Python
 .venv/
 __pycache__/
