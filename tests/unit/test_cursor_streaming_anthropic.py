@@ -306,6 +306,116 @@ async def test_bracket_tokens_split_across_chunks_still_parse(
 
 
 @pytest.mark.asyncio
+async def test_deepseek_final_sentinel_in_thinking_yields_visible_text(
+    patched_parse, mock_response, mock_model_cache, monkeypatch
+):
+    """composer-2.5 sometimes signals the visible answer with the DeepSeek
+    ``<\uff5cfinal\uff5c>`` token instead of ``</think>``. The gateway must
+    still surface the answer as a text block — otherwise the user sees
+    only ``Cogitated for Xs`` with no reply (the bug we are fixing).
+    """
+
+    full = (
+        "<think>let me reason briefly</think>"
+        f"<{PIPE}final{PIPE}>"
+        "\n\n## 答案\n\n这是最终回答内容。"
+    )
+
+    async def _fake_stream():
+        yield CursorEvent(type="thinking", thinking_content=full)
+
+    monkeypatch.setattr(
+        streaming,
+        "parse_cursor_stream",
+        lambda _r, _t=None: _fake_stream(),
+    )
+
+    events: List[str] = []
+    async for chunk in streaming.stream_cursor_to_anthropic(
+        response=mock_response,
+        model="composer-2.5",
+        model_cache=mock_model_cache,
+        first_token_timeout=5.0,
+    ):
+        events.append(chunk)
+
+    payloads = _parse_sse(events)
+
+    text_deltas = [
+        p for p in payloads
+        if p.get("type") == "content_block_delta"
+        and p.get("delta", {}).get("type") == "text_delta"
+    ]
+    visible = "".join(d["delta"]["text"] for d in text_deltas)
+
+    # Visible answer must reach the client, stripped of every DeepSeek
+    # sentinel. The lonely fullwidth pipe character must not survive.
+    assert "答案" in visible
+    assert "这是最终回答内容。" in visible
+    assert PIPE not in visible
+    assert "<final" not in visible
+    assert "</think>" not in visible
+
+    message_deltas = [p for p in payloads if p.get("type") == "message_delta"]
+    assert message_deltas[-1]["delta"]["stop_reason"] == "end_turn"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_final_sentinel_without_close_think(
+    patched_parse, mock_response, mock_model_cache, monkeypatch
+):
+    """Even when ``</think>`` is *absent* and only ``<\uff5cfinal\uff5c>``
+    separates reasoning from the answer, the visible body must reach the
+    client. Without this, the user sees only ``Cogitated for Xs``.
+    """
+
+    full = (
+        "I'm thinking about the request now..."
+        f"<{PIPE}final{PIPE}>"
+        "Here is the answer."
+    )
+
+    async def _fake_stream():
+        # Split it into many tiny chunks so the marker also crosses a
+        # chunk boundary — exercises the holdback logic.
+        for i in range(0, len(full), 3):
+            yield CursorEvent(type="thinking", thinking_content=full[i : i + 3])
+
+    monkeypatch.setattr(
+        streaming,
+        "parse_cursor_stream",
+        lambda _r, _t=None: _fake_stream(),
+    )
+
+    events: List[str] = []
+    async for chunk in streaming.stream_cursor_to_anthropic(
+        response=mock_response,
+        model="composer-2.5",
+        model_cache=mock_model_cache,
+        first_token_timeout=5.0,
+    ):
+        events.append(chunk)
+
+    payloads = _parse_sse(events)
+
+    text_deltas = [
+        p for p in payloads
+        if p.get("type") == "content_block_delta"
+        and p.get("delta", {}).get("type") == "text_delta"
+    ]
+    visible = "".join(d["delta"]["text"] for d in text_deltas)
+    assert visible == "Here is the answer."
+
+    thinking_deltas = [
+        p for p in payloads
+        if p.get("type") == "content_block_delta"
+        and p.get("delta", {}).get("type") == "thinking_delta"
+    ]
+    thought = "".join(d["delta"]["thinking"] for d in thinking_deltas)
+    assert thought == "I'm thinking about the request now..."
+
+
+@pytest.mark.asyncio
 async def test_tokens_split_across_content_events_still_parse(
     patched_parse, mock_response, mock_model_cache
 ):
