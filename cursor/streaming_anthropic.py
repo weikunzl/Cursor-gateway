@@ -16,6 +16,8 @@ from cursor.streaming_core import (
     FirstTokenTimeoutError,
     stream_with_first_token_retry,
 )
+from cursor.thinking_split import CursorThinkingSplitter
+from cursor.redacted_tools import RedactedToolStreamProcessor, extract_redacted_tool_calls
 from cursor.tokenizer import count_tokens, count_message_tokens
 from cursor.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES
 
@@ -60,6 +62,120 @@ async def stream_cursor_to_anthropic(
     text_block_started = False
     text_block_index: Optional[int] = None
     tool_blocks: List[Dict[str, Any]] = []
+    thinking_splitter = CursorThinkingSplitter()
+    redacted_processor = RedactedToolStreamProcessor()
+
+    async def _emit_tool_use(tool: Dict[str, Any]) -> AsyncGenerator[str, None]:
+        nonlocal current_block_index, thinking_block_started, thinking_block_index
+        nonlocal text_block_started, text_block_index, tool_blocks
+
+        if thinking_block_started and thinking_block_index is not None:
+            yield _format_sse_event("content_block_stop", {
+                "type": "content_block_stop", "index": thinking_block_index
+            })
+            thinking_block_started = False
+            current_block_index += 1
+
+        if text_block_started and text_block_index is not None:
+            yield _format_sse_event("content_block_stop", {
+                "type": "content_block_stop", "index": text_block_index
+            })
+            text_block_started = False
+            current_block_index += 1
+
+        tool_id = f"toolu_{uuid.uuid4().hex[:24]}"
+        tool_name = tool.get("name", "")
+        tool_input = tool.get("arguments", {})
+        if isinstance(tool_input, str):
+            try:
+                tool_input = json.loads(tool_input)
+            except json.JSONDecodeError:
+                tool_input = {}
+
+        yield _format_sse_event("content_block_start", {
+            "type": "content_block_start",
+            "index": current_block_index,
+            "content_block": {"type": "tool_use", "id": tool_id, "name": tool_name, "input": {}}
+        })
+        yield _format_sse_event("content_block_delta", {
+            "type": "content_block_delta",
+            "index": current_block_index,
+            "delta": {"type": "input_json_delta", "partial_json": json.dumps(tool_input, ensure_ascii=False)}
+        })
+        yield _format_sse_event("content_block_stop", {
+            "type": "content_block_stop", "index": current_block_index
+        })
+
+        tool_blocks.append({"id": tool_id, "name": tool_name, "input": tool_input})
+        current_block_index += 1
+
+    async def _emit_text_delta(text: str) -> AsyncGenerator[str, None]:
+        nonlocal current_block_index, thinking_block_started, thinking_block_index
+        nonlocal text_block_started, text_block_index, full_content
+
+        if not text:
+            return
+
+        full_content += text
+
+        if thinking_block_started and thinking_block_index is not None:
+            yield _format_sse_event("content_block_stop", {
+                "type": "content_block_stop", "index": thinking_block_index
+            })
+            thinking_block_started = False
+            current_block_index += 1
+
+        if not text_block_started:
+            text_block_index = current_block_index
+            yield _format_sse_event("content_block_start", {
+                "type": "content_block_start",
+                "index": text_block_index,
+                "content_block": {"type": "text", "text": ""}
+            })
+            text_block_started = True
+
+        yield _format_sse_event("content_block_delta", {
+            "type": "content_block_delta",
+            "index": text_block_index,
+            "delta": {"type": "text_delta", "text": text}
+        })
+
+    async def _emit_thinking_delta(thinking: str) -> AsyncGenerator[str, None]:
+        nonlocal thinking_block_started, thinking_block_index, current_block_index
+        nonlocal full_thinking_content
+
+        if not thinking:
+            return
+
+        full_thinking_content += thinking
+
+        if not thinking_block_started:
+            thinking_block_index = current_block_index
+            yield _format_sse_event("content_block_start", {
+                "type": "content_block_start",
+                "index": thinking_block_index,
+                "content_block": {
+                    "type": "thinking",
+                    "thinking": "",
+                    "signature": f"sig_{uuid.uuid4().hex[:32]}",
+                }
+            })
+            thinking_block_started = True
+
+        yield _format_sse_event("content_block_delta", {
+            "type": "content_block_delta",
+            "index": thinking_block_index,
+            "delta": {"type": "thinking_delta", "thinking": thinking}
+        })
+
+    async def _feed_visible_text(text: str) -> AsyncGenerator[str, None]:
+        """Emit visible text and parse embedded Cursor redacted tool calls."""
+        text_part, tools = redacted_processor.feed(text)
+        async for chunk in _emit_text_delta(text_part):
+            yield chunk
+        for tool in tools:
+            async for chunk in _emit_tool_use(tool):
+                yield chunk
 
     try:
         # Send message_start
@@ -79,88 +195,33 @@ async def stream_cursor_to_anthropic(
 
         async for event in parse_cursor_stream(response, first_token_timeout):
             if event.type == "content":
-                content = event.content or ""
-                full_content += content
-
-                # Close thinking block if transitioning to content
-                if thinking_block_started and thinking_block_index is not None:
-                    yield _format_sse_event("content_block_stop", {
-                        "type": "content_block_stop", "index": thinking_block_index
-                    })
-                    thinking_block_started = False
-                    current_block_index += 1
-
-                if not text_block_started:
-                    text_block_index = current_block_index
-                    yield _format_sse_event("content_block_start", {
-                        "type": "content_block_start",
-                        "index": text_block_index,
-                        "content_block": {"type": "text", "text": ""}
-                    })
-                    text_block_started = True
-
-                if content:
-                    yield _format_sse_event("content_block_delta", {
-                        "type": "content_block_delta",
-                        "index": text_block_index,
-                        "delta": {"type": "text_delta", "text": content}
-                    })
+                async for chunk in _feed_visible_text(event.content or ""):
+                    yield chunk
 
             elif event.type == "thinking":
-                thinking = event.thinking_content or ""
-                full_thinking_content += thinking
-
-                if not thinking_block_started:
-                    thinking_block_index = current_block_index
-                    yield _format_sse_event("content_block_start", {
-                        "type": "content_block_start",
-                        "index": thinking_block_index,
-                        "content_block": {"type": "thinking", "thinking": "", "signature": f"sig_{uuid.uuid4().hex[:32]}"}
-                    })
-                    thinking_block_started = True
-
-                if thinking:
-                    yield _format_sse_event("content_block_delta", {
-                        "type": "content_block_delta",
-                        "index": thinking_block_index,
-                        "delta": {"type": "thinking_delta", "thinking": thinking}
-                    })
+                raw_thinking = event.thinking_content or ""
+                reasoning_part, visible_part = thinking_splitter.feed(raw_thinking)
+                async for chunk in _emit_thinking_delta(reasoning_part):
+                    yield chunk
+                async for chunk in _feed_visible_text(visible_part):
+                    yield chunk
 
             elif event.type == "tool_use" and event.tool_use:
-                # Close open blocks
-                if thinking_block_started and thinking_block_index is not None:
-                    yield _format_sse_event("content_block_stop", {"type": "content_block_stop", "index": thinking_block_index})
-                    thinking_block_started = False
-                    current_block_index += 1
-                if text_block_started and text_block_index is not None:
-                    yield _format_sse_event("content_block_stop", {"type": "content_block_stop", "index": text_block_index})
-                    text_block_started = False
-                    current_block_index += 1
+                async for chunk in _emit_tool_use(event.tool_use):
+                    yield chunk
 
-                tool = event.tool_use
-                tool_id = f"toolu_{uuid.uuid4().hex[:24]}"
-                tool_name = tool.get("name", "")
-                tool_input = tool.get("arguments", {})
-                if isinstance(tool_input, str):
-                    try:
-                        tool_input = json.loads(tool_input)
-                    except json.JSONDecodeError:
-                        tool_input = {}
+        flush_reasoning, flush_visible = thinking_splitter.flush()
+        async for chunk in _emit_thinking_delta(flush_reasoning):
+            yield chunk
+        async for chunk in _feed_visible_text(flush_visible):
+            yield chunk
 
-                yield _format_sse_event("content_block_start", {
-                    "type": "content_block_start",
-                    "index": current_block_index,
-                    "content_block": {"type": "tool_use", "id": tool_id, "name": tool_name, "input": {}}
-                })
-                yield _format_sse_event("content_block_delta", {
-                    "type": "content_block_delta",
-                    "index": current_block_index,
-                    "delta": {"type": "input_json_delta", "partial_json": json.dumps(tool_input, ensure_ascii=False)}
-                })
-                yield _format_sse_event("content_block_stop", {"type": "content_block_stop", "index": current_block_index})
-
-                tool_blocks.append({"id": tool_id, "name": tool_name, "input": tool_input})
-                current_block_index += 1
+        flush_text, flush_tools = redacted_processor.flush()
+        async for chunk in _emit_text_delta(flush_text):
+            yield chunk
+        for tool in flush_tools:
+            async for chunk in _emit_tool_use(tool):
+                yield chunk
 
         # Close remaining blocks
         if thinking_block_started and thinking_block_index is not None:
@@ -212,14 +273,24 @@ async def collect_anthropic_response(
     full_content = ""
     full_thinking = ""
     tool_calls = []
+    thinking_splitter = CursorThinkingSplitter()
 
     async for event in parse_cursor_stream(response):
         if event.type == "content" and event.content:
             full_content += event.content
         elif event.type == "thinking" and event.thinking_content:
-            full_thinking += event.thinking_content
+            reasoning_part, visible_part = thinking_splitter.feed(event.thinking_content)
+            full_thinking += reasoning_part
+            full_content += visible_part
         elif event.type == "tool_use" and event.tool_use:
             tool_calls.append(event.tool_use)
+
+    flush_reasoning, flush_visible = thinking_splitter.flush()
+    full_thinking += flush_reasoning
+    full_content += flush_visible
+
+    full_content, redacted_tools = extract_redacted_tool_calls(full_content)
+    tool_calls.extend(redacted_tools)
 
     try:
         await response.aclose()
