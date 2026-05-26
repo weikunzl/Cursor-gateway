@@ -18,6 +18,7 @@ from cursor.streaming_core import (
 )
 from cursor.thinking_split import CursorThinkingSplitter
 from cursor.redacted_tools import RedactedToolStreamProcessor, extract_redacted_tool_calls
+from cursor.bracket_tools import BracketToolCallProcessor, extract_bracket_tool_calls
 from cursor.tokenizer import count_tokens, count_message_tokens
 from cursor.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES
 
@@ -64,6 +65,7 @@ async def stream_cursor_to_anthropic(
     tool_blocks: List[Dict[str, Any]] = []
     thinking_splitter = CursorThinkingSplitter()
     redacted_processor = RedactedToolStreamProcessor()
+    bracket_processor = BracketToolCallProcessor()
 
     async def _emit_tool_use(tool: Dict[str, Any]) -> AsyncGenerator[str, None]:
         nonlocal current_block_index, thinking_block_started, thinking_block_index
@@ -169,11 +171,27 @@ async def stream_cursor_to_anthropic(
         })
 
     async def _feed_visible_text(text: str) -> AsyncGenerator[str, None]:
-        """Emit visible text and parse embedded Cursor redacted tool calls."""
+        """Emit visible text after stripping embedded tool-call dialects.
+
+        The composer-2.5 model occasionally narrates tool invocations using
+        two different inline formats:
+
+        * DeepSeek native tokens (``<｜tool▁call▁begin｜>...``) handled by
+          ``RedactedToolStreamProcessor``.
+        * Markdown-ish ``[Tool Call: Name({...})]`` handled by
+          ``BracketToolCallProcessor``.
+
+        We chain them so any tool call surfaced via either dialect is
+        promoted to a structured ``tool_use`` block.
+        """
         text_part, tools = redacted_processor.feed(text)
+        text_part, bracket_tools = bracket_processor.feed(text_part)
         async for chunk in _emit_text_delta(text_part):
             yield chunk
         for tool in tools:
+            async for chunk in _emit_tool_use(tool):
+                yield chunk
+        for tool in bracket_tools:
             async for chunk in _emit_tool_use(tool):
                 yield chunk
 
@@ -217,9 +235,16 @@ async def stream_cursor_to_anthropic(
             yield chunk
 
         flush_text, flush_tools = redacted_processor.flush()
+        flush_text, flush_bracket_tools = bracket_processor.feed(flush_text)
+        final_text, final_bracket_tools = bracket_processor.flush()
+        flush_text += final_text
+        flush_bracket_tools.extend(final_bracket_tools)
         async for chunk in _emit_text_delta(flush_text):
             yield chunk
         for tool in flush_tools:
+            async for chunk in _emit_tool_use(tool):
+                yield chunk
+        for tool in flush_bracket_tools:
             async for chunk in _emit_tool_use(tool):
                 yield chunk
 
@@ -291,6 +316,8 @@ async def collect_anthropic_response(
 
     full_content, redacted_tools = extract_redacted_tool_calls(full_content)
     tool_calls.extend(redacted_tools)
+    full_content, bracket_tools = extract_bracket_tool_calls(full_content)
+    tool_calls.extend(bracket_tools)
 
     try:
         await response.aclose()
