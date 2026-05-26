@@ -13,6 +13,7 @@ from cursor.models_openai import ChatMessage, ChatCompletionRequest, Tool
 from cursor.converters_core import (
     extract_text_content,
     extract_images_from_content,
+    BuildResult,
     UnifiedMessage,
     UnifiedTool,
     build_cursor_payload as core_build_cursor_payload,
@@ -148,22 +149,26 @@ def convert_openai_tools_to_unified(tools: Optional[List[Tool]]) -> Optional[Lis
 def build_cursor_payload(
     request_data: ChatCompletionRequest,
     conversation_id: str,
-) -> bytes:
+) -> "BuildResult":
     """
-    Builds complete payload for Cursor API from OpenAI request.
+    Build the complete Cursor payload for an OpenAI chat-completions request.
+
+    Args:
+        request_data: Validated OpenAI Chat Completions request body.
+        conversation_id: Stable conversation identifier (sent to Cursor).
 
     Returns:
-        Protobuf-encoded bytes in ConnectRPC envelope
+        ``BuildResult`` carrying the protobuf-encoded ConnectRPC envelope
+        together with the ``compressed`` flag the HTTP layer needs to
+        advertise via ``Connect-Content-Encoding``.
     """
     system_prompt, unified_messages = convert_openai_messages_to_unified(request_data.messages)
     unified_tools = convert_openai_tools_to_unified(request_data.tools)
 
-    result = core_build_cursor_payload(
+    return core_build_cursor_payload(
         messages=unified_messages,
         system_prompt=system_prompt,
         model_id=request_data.model,
         tools=unified_tools,
         conversation_id=conversation_id,
     )
-
-    return result.payload

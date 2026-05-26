@@ -78,29 +78,43 @@ class CursorHttpClient:
         url: str,
         data: bytes,
         stream: bool = False,
+        compressed: bool = False,
     ) -> httpx.Response:
         """
-        Executes an HTTP request with retry logic.
+        Execute an HTTP request against Cursor's ConnectRPC endpoint with
+        retry logic.
 
         Args:
-            method: HTTP method
-            url: Request URL
-            data: Protobuf-encoded request body (bytes)
-            stream: Use streaming mode
+            method: HTTP method.
+            url: Request URL.
+            data: ConnectRPC envelope bytes (protobuf payload prefixed by the
+                5-byte ``[flags][len]`` envelope header).
+            stream: Use streaming mode (Server-Sent stream over HTTP/2).
+            compressed: ``True`` if ``data`` is a gzip-compressed envelope
+                (first flag byte = ``0x01``). When set, the
+                ``Connect-Content-Encoding: gzip`` request header is added so
+                Cursor's server knows how to decode the body. Forgetting to
+                set this flag results in an in-stream ``"received compressed
+                envelope, but do not know how to decompress"`` error.
 
         Returns:
-            httpx.Response
+            httpx.Response. Streaming responses are returned with the body
+            still open; the caller owns closing it.
 
         Raises:
-            HTTPException: On failure after all attempts
+            HTTPException: On failure after all retry attempts.
         """
         max_retries = FIRST_TOKEN_MAX_RETRIES if stream else MAX_RETRIES
         client = await self._get_client(stream=stream)
         last_error = None
+        content_encoding = "gzip" if compressed else None
 
         for attempt in range(max_retries):
             try:
-                headers = get_cursor_headers(self.auth_manager)
+                headers = get_cursor_headers(
+                    self.auth_manager,
+                    content_encoding=content_encoding,
+                )
 
                 if stream:
                     headers["Connection"] = "close"
@@ -109,10 +123,16 @@ class CursorHttpClient:
                         content=data,
                         headers=headers,
                     )
-                    logger.debug("Sending streaming request to Cursor API...")
+                    logger.debug(
+                        f"Sending streaming request to Cursor API "
+                        f"(compressed={compressed}, size={len(data)})..."
+                    )
                     response = await client.send(req, stream=True)
                 else:
-                    logger.debug("Sending request to Cursor API...")
+                    logger.debug(
+                        f"Sending request to Cursor API "
+                        f"(compressed={compressed}, size={len(data)})..."
+                    )
                     response = await client.request(
                         method, url,
                         content=data,

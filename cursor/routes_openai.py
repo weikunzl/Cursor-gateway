@@ -79,7 +79,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     conversation_id = generate_conversation_id()
 
     try:
-        cursor_payload = build_cursor_payload(request_data, conversation_id)
+        build_result = build_cursor_payload(request_data, conversation_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -97,7 +97,11 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     tools_for_tokenizer = [tool.model_dump() for tool in request_data.tools] if request_data.tools else None
 
     try:
-        response = await http_client.request_with_retry("POST", url, cursor_payload, stream=True)
+        response = await http_client.request_with_retry(
+            "POST", url, build_result.payload,
+            stream=True,
+            compressed=build_result.compressed,
+        )
 
         if response.status_code != 200:
             try:

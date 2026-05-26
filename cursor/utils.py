@@ -7,7 +7,7 @@ and other common utilities.
 
 import platform
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 
@@ -51,15 +51,27 @@ def _platform_os_version() -> str:
     return platform.release()
 
 
-def get_cursor_headers(auth_manager: "CursorAuthManager") -> dict:
+def get_cursor_headers(
+    auth_manager: "CursorAuthManager",
+    content_encoding: Optional[str] = None,
+) -> dict:
     """
-    Builds headers for Cursor ConnectRPC API requests.
+    Build headers for a Cursor ConnectRPC API request.
 
     Args:
-        auth_manager: Authentication manager
+        auth_manager: Authentication manager that supplies the bearer token,
+            session_id, client_key and machine_id.
+        content_encoding: Algorithm used to compress the request body
+            envelope. Must match the actual compression performed by
+            :func:`cursor.protobuf.wrap_connect_envelope`. Pass ``"gzip"``
+            for compressed envelopes, ``None`` or ``"identity"`` for raw
+            payloads. The ConnectRPC server uses this header to decide how
+            to decompress; mismatches surface as an in-stream
+            ``"received compressed envelope, but do not know how to
+            decompress"`` error event.
 
     Returns:
-        Dictionary with all required headers
+        Dictionary with all required ConnectRPC + Cursor-specific headers.
     """
     token = auth_manager.get_access_token()
     request_id = str(uuid.uuid4())
@@ -68,6 +80,8 @@ def get_cursor_headers(auth_manager: "CursorAuthManager") -> dict:
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/connect+proto",
         "Connect-Protocol-Version": "1",
+        # Tell the server what compressions we can decode in its reply.
+        "Connect-Accept-Encoding": "gzip,identity",
         "User-Agent": "connect-es/1.6.1",
         "x-cursor-client-version": CURSOR_CLIENT_VERSION,
         "x-cursor-client-type": CURSOR_CLIENT_TYPE,
@@ -84,6 +98,10 @@ def get_cursor_headers(auth_manager: "CursorAuthManager") -> dict:
         "x-session-id": auth_manager.session_id,
         "x-client-key": auth_manager.client_key,
     }
+
+    # ``identity`` is the "no encoding" sentinel — never advertise it.
+    if content_encoding and content_encoding.lower() != "identity":
+        headers["Connect-Content-Encoding"] = content_encoding.lower()
 
     # Add checksum if machine_id is available
     if auth_manager.machine_id:

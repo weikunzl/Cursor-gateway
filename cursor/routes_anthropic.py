@@ -108,7 +108,7 @@ async def messages(
     conversation_id = generate_conversation_id()
 
     try:
-        cursor_payload = anthropic_to_cursor(request_data, conversation_id)
+        build_result = anthropic_to_cursor(request_data, conversation_id)
     except ValueError as e:
         return JSONResponse(
             status_code=400,
@@ -126,7 +126,11 @@ async def messages(
     messages_for_tokenizer = [msg.model_dump() for msg in request_data.messages]
 
     try:
-        response = await http_client.request_with_retry("POST", url, cursor_payload, stream=True)
+        response = await http_client.request_with_retry(
+            "POST", url, build_result.payload,
+            stream=True,
+            compressed=build_result.compressed,
+        )
 
         if response.status_code != 200:
             try:

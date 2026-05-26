@@ -15,6 +15,7 @@ from cursor.models_anthropic import (
     AnthropicTool,
 )
 from cursor.converters_core import (
+    BuildResult,
     UnifiedMessage,
     UnifiedTool,
     build_cursor_payload as core_build_cursor_payload,
@@ -169,23 +170,27 @@ def convert_anthropic_tools(tools: Optional[List[AnthropicTool]]) -> Optional[Li
 def anthropic_to_cursor(
     request: AnthropicMessagesRequest,
     conversation_id: str,
-) -> bytes:
+) -> "BuildResult":
     """
-    Converts Anthropic Messages API request to Cursor API payload.
+    Convert an Anthropic Messages API request into a Cursor payload.
+
+    Args:
+        request: Validated Anthropic Messages API request body.
+        conversation_id: Stable conversation identifier (sent to Cursor).
 
     Returns:
-        Protobuf-encoded bytes in ConnectRPC envelope
+        ``BuildResult`` carrying the protobuf-encoded ConnectRPC envelope
+        together with the ``compressed`` flag the HTTP layer needs to
+        advertise via ``Connect-Content-Encoding``.
     """
     unified_messages = convert_anthropic_messages(request.messages)
     unified_tools = convert_anthropic_tools(request.tools)
     system_prompt = extract_system_prompt(request.system)
 
-    result = core_build_cursor_payload(
+    return core_build_cursor_payload(
         messages=unified_messages,
         system_prompt=system_prompt,
         model_id=request.model,
         tools=unified_tools,
         conversation_id=conversation_id,
     )
-
-    return result.payload

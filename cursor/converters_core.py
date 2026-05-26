@@ -40,10 +40,22 @@ class UnifiedTool:
 
 @dataclass
 class BuildResult:
-    """Result of building a Cursor payload."""
-    payload: bytes  # protobuf-encoded bytes wrapped in ConnectRPC envelope
+    """Result of building a Cursor payload.
+
+    Attributes:
+        payload: Protobuf-encoded bytes wrapped in a ConnectRPC envelope.
+        model_id: Resolved model identifier sent to Cursor.
+        message_count: Number of protobuf messages in the request.
+        compressed: True if ``payload`` is a gzip-compressed envelope (first
+            flag byte = ``0x01``). Callers must advertise this to the server
+            via the ``Connect-Content-Encoding`` request header — otherwise
+            Cursor's backend rejects the call with ``"received compressed
+            envelope, but do not know how to decompress"``.
+    """
+    payload: bytes
     model_id: str
     message_count: int
+    compressed: bool = False
 
 
 def extract_text_content(content: Any) -> str:
@@ -238,4 +250,5 @@ def build_cursor_payload(
         payload=envelope,
         model_id=model_id,
         message_count=len(proto_messages),
+        compressed=compress,
     )
