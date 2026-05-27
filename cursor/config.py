@@ -108,11 +108,44 @@ FIRST_TOKEN_MAX_RETRIES: int = int(os.getenv("FIRST_TOKEN_MAX_RETRIES", "3"))
 MODEL_CACHE_TTL: int = 3600
 DEFAULT_MAX_INPUT_TOKENS: int = 200000
 
-# Model aliases
-MODEL_ALIASES: Dict[str, str] = {}
+# Model aliases — maps incoming model names to Cursor-recognized model IDs.
+# This is the canonical mapping for client-side model names that Cursor doesn't
+# natively recognise (e.g. Claude Code SDK model IDs like "claude-opus-4-6").
+MODEL_ALIASES: Dict[str, str] = {
+    # In China region, only composer-2.5 and cursor-small are accessible.
+    # All Anthropic/GPT models return UNSUPPORTED_REGION errors.
+    # Map everything to composer-2.5 which is the only fully-working model.
+    "claude-opus-4-6": "composer-2.5",
+    "claude-opus-4.6": "composer-2.5",
+    "claude-opus-4-5": "composer-2.5",
+    "claude-opus-4.5": "composer-2.5",
+    "claude-4.0-opus": "composer-2.5",
+    "claude-4-sonnet": "composer-2.5",
+    "claude-4.0-sonnet": "composer-2.5",
+    "claude-3.5-sonnet": "composer-2.5",
+    "claude-sonnet-4-6": "composer-2.5",
+    "claude-sonnet-4.6": "composer-2.5",
+    "claude-4.6-sonnet-medium-thinking": "composer-2.5",
+    "gpt-4o": "composer-2.5",
+    "gpt-4o-mini": "composer-2.5",
+    "gpt-5.3-codex": "composer-2.5",
+    "gpt-5.5-medium": "composer-2.5",
+}
 
 # Models hidden from /v1/models list
 HIDDEN_FROM_LIST: List[str] = []
+
+# Models for which we suppress Anthropic thinking blocks.
+# Some clients (e.g. Claude Code CLI) crash on thinking blocks from
+# non-Anthropic models. The thinking content itself has already been
+# split by CursorThinkingSplitter — the visible portion still flows
+# through the normal text blocks. This list is matched by substring;
+# "composer" covers composer-2.5, composer-2.0, etc.
+SUPPRESS_THINKING_MODELS: List[str] = [
+    s.strip()
+    for s in os.getenv("SUPPRESS_THINKING_MODELS", "composer").split(",")
+    if s.strip()
+]
 
 # Fallback models when API is unreachable
 FALLBACK_MODELS: List[Dict[str, str]] = [

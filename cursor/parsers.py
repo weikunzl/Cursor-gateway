@@ -200,6 +200,7 @@ class ConnectRpcStreamParser:
     def _parse_json_frame(self, payload: bytes) -> List[StreamEvent]:
         """Parse a JSON frame (usually end-of-stream or error)."""
         events = []
+        logger.debug(f"[PARSER] JSON frame raw: {payload[:500]!r}")
 
         try:
             # Very small JSON payloads (2 bytes) signal end of stream

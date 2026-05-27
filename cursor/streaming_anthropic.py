@@ -20,7 +20,7 @@ from cursor.thinking_split import CursorThinkingSplitter
 from cursor.redacted_tools import RedactedToolStreamProcessor, extract_redacted_tool_calls
 from cursor.bracket_tools import BracketToolCallProcessor, extract_bracket_tool_calls
 from cursor.tokenizer import count_tokens, count_message_tokens
-from cursor.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES
+from cursor.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES, SUPPRESS_THINKING_MODELS
 
 if TYPE_CHECKING:
     from cursor.auth import CursorAuthManager
@@ -66,6 +66,9 @@ async def stream_cursor_to_anthropic(
     thinking_splitter = CursorThinkingSplitter()
     redacted_processor = RedactedToolStreamProcessor()
     bracket_processor = BracketToolCallProcessor()
+    suppress_thinking = any(marker in model for marker in SUPPRESS_THINKING_MODELS)
+    if suppress_thinking:
+        logger.debug(f"Suppressing thinking blocks for model={model}")
 
     async def _emit_tool_use(tool: Dict[str, Any]) -> AsyncGenerator[str, None]:
         nonlocal current_block_index, thinking_block_started, thinking_block_index
@@ -219,8 +222,11 @@ async def stream_cursor_to_anthropic(
             elif event.type == "thinking":
                 raw_thinking = event.thinking_content or ""
                 reasoning_part, visible_part = thinking_splitter.feed(raw_thinking)
-                async for chunk in _emit_thinking_delta(reasoning_part):
-                    yield chunk
+                if not suppress_thinking:
+                    async for chunk in _emit_thinking_delta(reasoning_part):
+                        yield chunk
+                else:
+                    full_thinking_content += reasoning_part
                 async for chunk in _feed_visible_text(visible_part):
                     yield chunk
 
@@ -228,9 +234,24 @@ async def stream_cursor_to_anthropic(
                 async for chunk in _emit_tool_use(event.tool_use):
                     yield chunk
 
+            elif event.type == "error":
+                error_data = event.error if event.error else "Unknown Cursor API error"
+                logger.error(f"Cursor API error: {error_data}")
+                yield _format_sse_event("error", {
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": f"Cursor API error: {error_data}"
+                    }
+                })
+                return  # Stop streaming on error
+
         flush_reasoning, flush_visible = thinking_splitter.flush()
-        async for chunk in _emit_thinking_delta(flush_reasoning):
-            yield chunk
+        if not suppress_thinking:
+            async for chunk in _emit_thinking_delta(flush_reasoning):
+                yield chunk
+        else:
+            full_thinking_content += flush_reasoning
         async for chunk in _feed_visible_text(flush_visible):
             yield chunk
 
@@ -295,6 +316,8 @@ async def collect_anthropic_response(
     if request_messages:
         input_tokens = count_message_tokens(request_messages, apply_claude_correction=False)
 
+    suppress_thinking = any(marker in model for marker in SUPPRESS_THINKING_MODELS)
+
     full_content = ""
     full_thinking = ""
     tool_calls = []
@@ -305,13 +328,15 @@ async def collect_anthropic_response(
             full_content += event.content
         elif event.type == "thinking" and event.thinking_content:
             reasoning_part, visible_part = thinking_splitter.feed(event.thinking_content)
-            full_thinking += reasoning_part
+            if not suppress_thinking:
+                full_thinking += reasoning_part
             full_content += visible_part
         elif event.type == "tool_use" and event.tool_use:
             tool_calls.append(event.tool_use)
 
     flush_reasoning, flush_visible = thinking_splitter.flush()
-    full_thinking += flush_reasoning
+    if not suppress_thinking:
+        full_thinking += flush_reasoning
     full_content += flush_visible
 
     full_content, redacted_tools = extract_redacted_tool_calls(full_content)
