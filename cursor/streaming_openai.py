@@ -57,6 +57,7 @@ async def stream_cursor_to_openai_internal(
 
     def _make_chunk(delta: dict) -> str:
         """Build and format an OpenAI SSE chunk."""
+        nonlocal first_chunk
         if first_chunk:
             delta["role"] = "assistant"
             first_chunk = False
