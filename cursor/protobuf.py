@@ -213,6 +213,7 @@ def encode_chat_request(
     client_os: str = "darwin",
     client_arch: str = "arm64",
     client_os_version: str = "",
+    is_agentic: bool = False,
 ) -> bytes:
     """
     Encode the full chat request for Cursor's StreamUnifiedChatWithTools RPC.
@@ -309,8 +310,8 @@ def encode_chat_request(
     # Field 26: metadata
     request_data += encode_submessage(26, encode_metadata(client_os, client_arch, client_os_version))
 
-    # Field 27: is_agentic = 0
-    request_data += encode_int32(27, 0)
+    # Field 27: is_agentic
+    request_data += encode_int32(27, 1 if is_agentic else 0)
 
     # Field 30: message_ids
     for mid in message_ids:
@@ -341,8 +342,8 @@ def encode_chat_request(
     # Field 53: mode_uses_auto_apply = 1
     request_data += encode_int32(53, 1)
 
-    # Field 54: unified_mode_name = "Ask"
-    request_data += encode_string(54, "Ask")
+    # Field 54: unified_mode_name
+    request_data += encode_string(54, "Agent" if is_agentic else "Ask")
 
     # Wrap in StreamUnifiedChatRequestWithTools field 1
     return encode_submessage(1, request_data)

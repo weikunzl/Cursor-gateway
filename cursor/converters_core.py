@@ -224,6 +224,10 @@ def build_cursor_payload(
     # Merge consecutive same-role messages
     proto_messages = _merge_consecutive_messages(proto_messages)
 
+    # Determine if agent mode (when tools are provided)
+    use_agent = bool(tools)
+    logger.info(f"Building Cursor payload: is_agentic={use_agent}, tools={len(tools) if tools else 0}")
+
     # Encode to protobuf
     proto_bytes = encode_chat_request(
         messages=proto_messages,
@@ -233,6 +237,7 @@ def build_cursor_payload(
         client_os=_platform_os(),
         client_arch=_platform_arch(),
         client_os_version=_platform_os_version(),
+        is_agentic=use_agent,
     )
 
     # Wrap in ConnectRPC envelope
