@@ -29,7 +29,16 @@ SERVER_PORT: int = int(os.getenv("CURSOR_SERVER_PORT", os.getenv("SERVER_PORT", 
 # Proxy Server Settings
 # ==================================================================================================
 
-PROXY_API_KEY: str = os.getenv("PROXY_API_KEY", "my-super-secret-password-123")
+_DEFAULT_PROXY_API_KEY = "my-super-secret-password-123"
+PROXY_API_KEY: str = os.getenv("PROXY_API_KEY", _DEFAULT_PROXY_API_KEY)
+
+if PROXY_API_KEY == _DEFAULT_PROXY_API_KEY:
+    import warnings
+    warnings.warn(
+        "PROXY_API_KEY is using the insecure default value. "
+        "Set PROXY_API_KEY in .env.cursor for production use.",
+        stacklevel=2,
+    )
 
 # ==================================================================================================
 # VPN/Proxy Settings
