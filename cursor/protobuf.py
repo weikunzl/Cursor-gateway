@@ -287,8 +287,9 @@ def encode_chat_request(
     request_data += encode_int32(4, 1)
 
     # Field 5: model_details
-    # Some models (e.g., claude-4-opus) require max_mode to be enabled
-    max_mode = model in {"claude-4-opus"}
+    # Some models require max_mode to be enabled (configurable in config.py)
+    from cursor.config import MAX_MODE_MODELS
+    max_mode = model in MAX_MODE_MODELS
     model_bytes = encode_model_details(model, max_mode=max_mode)
     request_data += encode_submessage(5, model_bytes)
 

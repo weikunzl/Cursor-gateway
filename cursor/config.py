@@ -173,6 +173,16 @@ FALLBACK_MODELS: List[Dict[str, str]] = [
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # ==================================================================================================
+# Cursor-specific Settings
+# ==================================================================================================
+
+# Models that require max_mode to be enabled in the protobuf request.
+MAX_MODE_MODELS: List[str] = ["claude-4-opus"]
+
+# Timezone sent in x-cursor-timezone header.
+CURSOR_TIMEZONE: str = os.getenv("CURSOR_TIMEZONE", "Asia/Shanghai")
+
+# ==================================================================================================
 # Debug Settings
 # ==================================================================================================
 

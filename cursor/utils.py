@@ -16,6 +16,7 @@ from cursor.config import (
     CURSOR_CLIENT_VERSION,
     CURSOR_CLIENT_TYPE,
     CURSOR_GHOST_MODE,
+    CURSOR_TIMEZONE,
 )
 
 if TYPE_CHECKING:
@@ -90,7 +91,7 @@ def get_cursor_headers(
         "x-cursor-client-os-version": _platform_os_version(),
         "x-cursor-client-device-type": "desktop",
         "x-cursor-config-version": str(uuid.uuid4()),
-        "x-cursor-timezone": "Asia/Shanghai",
+        "x-cursor-timezone": CURSOR_TIMEZONE,
         "x-amzn-trace-id": f"Root={request_id}",
         "x-new-onboarding-completed": "true",
         "x-ghost-mode": "true" if CURSOR_GHOST_MODE else "false",
