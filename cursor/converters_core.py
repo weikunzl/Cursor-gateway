@@ -9,15 +9,8 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-import platform
-
 from cursor.protobuf import encode_chat_request, wrap_connect_envelope
-from cursor.utils import generate_message_id, _platform_os, _platform_arch
-
-def _platform_os_version() -> str:
-    if platform.system() == "Darwin":
-        return platform.mac_ver()[0] or platform.release()
-    return platform.release()
+from cursor.utils import generate_message_id, _platform_os, _platform_arch, _platform_os_version
 
 
 @dataclass
