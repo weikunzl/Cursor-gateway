@@ -323,31 +323,32 @@ async def collect_anthropic_response(
     tool_calls = []
     thinking_splitter = CursorThinkingSplitter()
 
-    async for event in parse_cursor_stream(response):
-        if event.type == "content" and event.content:
-            full_content += event.content
-        elif event.type == "thinking" and event.thinking_content:
-            reasoning_part, visible_part = thinking_splitter.feed(event.thinking_content)
-            if not suppress_thinking:
-                full_thinking += reasoning_part
-            full_content += visible_part
-        elif event.type == "tool_use" and event.tool_use:
-            tool_calls.append(event.tool_use)
-
-    flush_reasoning, flush_visible = thinking_splitter.flush()
-    if not suppress_thinking:
-        full_thinking += flush_reasoning
-    full_content += flush_visible
-
-    full_content, redacted_tools = extract_redacted_tool_calls(full_content)
-    tool_calls.extend(redacted_tools)
-    full_content, bracket_tools = extract_bracket_tool_calls(full_content)
-    tool_calls.extend(bracket_tools)
-
     try:
-        await response.aclose()
-    except Exception:
-        pass
+        async for event in parse_cursor_stream(response):
+            if event.type == "content" and event.content:
+                full_content += event.content
+            elif event.type == "thinking" and event.thinking_content:
+                reasoning_part, visible_part = thinking_splitter.feed(event.thinking_content)
+                if not suppress_thinking:
+                    full_thinking += reasoning_part
+                full_content += visible_part
+            elif event.type == "tool_use" and event.tool_use:
+                tool_calls.append(event.tool_use)
+
+        flush_reasoning, flush_visible = thinking_splitter.flush()
+        if not suppress_thinking:
+            full_thinking += flush_reasoning
+        full_content += flush_visible
+
+        full_content, redacted_tools = extract_redacted_tool_calls(full_content)
+        tool_calls.extend(redacted_tools)
+        full_content, bracket_tools = extract_bracket_tool_calls(full_content)
+        tool_calls.extend(bracket_tools)
+    finally:
+        try:
+            await response.aclose()
+        except Exception:
+            pass
 
     content_blocks = []
     if full_thinking:
