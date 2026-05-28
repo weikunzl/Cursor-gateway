@@ -390,7 +390,7 @@ async def test_deepseek_final_sentinel_without_close_think(
     events: List[str] = []
     async for chunk in streaming.stream_cursor_to_anthropic(
         response=mock_response,
-        model="composer-2.5",
+        model="claude-4-sonnet",
         model_cache=mock_model_cache,
         first_token_timeout=5.0,
     ):
