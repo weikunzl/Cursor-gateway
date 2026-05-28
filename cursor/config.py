@@ -117,6 +117,11 @@ MODEL_ALIASES: Dict[str, str] = {
     # Map everything to composer-2.5 which is the only fully-working model.
     "claude-opus-4-6": "composer-2.5",
     "claude-opus-4.6": "composer-2.5",
+    "claude-opus-4-7": "composer-2.5",
+    "claude-opus-4.7": "composer-2.5",
+    # Claude Code / switch-script typo; Cursor API rejects this ID.
+    "claude-opus-4-7-thinking-xhign": "composer-2.5",
+    "claude-opus-4-7-thinking-high": "composer-2.5",
     "claude-opus-4-5": "composer-2.5",
     "claude-opus-4.5": "composer-2.5",
     "claude-4.0-opus": "composer-2.5",
@@ -149,16 +154,16 @@ SUPPRESS_THINKING_MODELS: List[str] = [
 
 # Fallback models when API is unreachable
 FALLBACK_MODELS: List[Dict[str, str]] = [
+    {"modelId": "composer-2.5"},
+    {"modelId": "cursor-small"},
     {"modelId": "claude-4-sonnet"},
     {"modelId": "claude-3.5-sonnet"},
     {"modelId": "claude-4-opus"},
     {"modelId": "gpt-4o"},
     {"modelId": "gpt-4o-mini"},
-    {"modelId": "cursor-small"},
     {"modelId": "gpt-5.3-codex"},
     {"modelId": "claude-4.6-sonnet-medium-thinking"},
     {"modelId": "gpt-5.5-medium"},
-    {"modelId": "claude-opus-4-7-thinking-xhign"},
 ]
 
 # ==================================================================================================
