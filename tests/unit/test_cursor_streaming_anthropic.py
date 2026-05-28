@@ -386,6 +386,11 @@ async def test_deepseek_final_sentinel_without_close_think(
         "parse_cursor_stream",
         lambda _r, _t=None: _fake_stream(),
     )
+    # Pin SUPPRESS_THINKING_MODELS so this test asserts thinking-delta
+    # emission regardless of the user's local env (e.g. a developer who
+    # added "claude" to the env override would otherwise see the thinking
+    # block suppressed and a confusing empty-string failure).
+    monkeypatch.setattr(streaming, "SUPPRESS_THINKING_MODELS", [])
 
     events: List[str] = []
     async for chunk in streaming.stream_cursor_to_anthropic(
