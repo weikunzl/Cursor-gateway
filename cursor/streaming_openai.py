@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from loguru import logger
 
 from cursor.utils import generate_completion_id
-from cursor.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES
+from cursor.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES, SUPPRESS_THINKING_MODELS
 from cursor.tokenizer import count_tokens, count_message_tokens, count_tools_tokens
 from cursor.streaming_core import (
     parse_cursor_stream,
@@ -21,6 +21,7 @@ from cursor.streaming_core import (
     CursorEvent,
     stream_with_first_token_retry as stream_with_first_token_retry_core,
 )
+from cursor.thinking_split import CursorThinkingSplitter
 
 if TYPE_CHECKING:
     from cursor.auth import CursorAuthManager
@@ -51,42 +52,39 @@ async def stream_cursor_to_openai_internal(
     full_content = ""
     full_thinking_content = ""
     tool_calls_from_stream = []
+    thinking_splitter = CursorThinkingSplitter()
+    suppress_thinking = any(marker in model for marker in SUPPRESS_THINKING_MODELS)
+
+    def _make_chunk(delta: dict) -> str:
+        """Build and format an OpenAI SSE chunk."""
+        if first_chunk:
+            delta["role"] = "assistant"
+            first_chunk = False
+        openai_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_time,
+            "model": model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
+        }
+        return f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
     try:
         async for event in parse_cursor_stream(response, first_token_timeout):
             if event.type == "content" and event.content:
                 full_content += event.content
-
-                delta = {"content": event.content}
-                if first_chunk:
-                    delta["role"] = "assistant"
-                    first_chunk = False
-
-                openai_chunk = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
-                }
-                yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                yield _make_chunk({"content": event.content})
 
             elif event.type == "thinking" and event.thinking_content:
-                full_thinking_content += event.thinking_content
-
-                delta = {"reasoning_content": event.thinking_content}
-                if first_chunk:
-                    delta["role"] = "assistant"
-                    first_chunk = False
-
-                openai_chunk = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
-                }
-                yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                reasoning_part, visible_part = thinking_splitter.feed(event.thinking_content)
+                if not suppress_thinking and reasoning_part:
+                    full_thinking_content += reasoning_part
+                    yield _make_chunk({"reasoning_content": reasoning_part})
+                elif suppress_thinking:
+                    full_thinking_content += reasoning_part
+                if visible_part:
+                    full_content += visible_part
+                    yield _make_chunk({"content": visible_part})
 
             elif event.type == "tool_use" and event.tool_use:
                 tool_calls_from_stream.append(event.tool_use)
@@ -98,6 +96,17 @@ async def stream_cursor_to_openai_internal(
                 error_text = str(event.error) if not isinstance(event.error, dict) else json.dumps(event.error, ensure_ascii=False)
                 logger.warning(f"Cursor upstream error: {error_text}")
                 raise HTTPException(status_code=502, detail=f"Cursor API error: {error_text}")
+
+        # Flush the thinking splitter at end of stream
+        flush_reasoning, flush_visible = thinking_splitter.flush()
+        if not suppress_thinking and flush_reasoning:
+            full_thinking_content += flush_reasoning
+            yield _make_chunk({"reasoning_content": flush_reasoning})
+        elif suppress_thinking:
+            full_thinking_content += flush_reasoning
+        if flush_visible:
+            full_content += flush_visible
+            yield _make_chunk({"content": flush_visible})
 
         # Determine finish_reason
         finish_reason = "tool_calls" if tool_calls_from_stream else "stop"
