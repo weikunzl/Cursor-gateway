@@ -21,7 +21,11 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(python:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "mcp__internal-mcp__who_am_i",
+      "mcp__internal-mcp__search_for_projects",
+      "Read(//Users/kunwei/Documents/workspace/galaxy/galaxy-skills-marketplace/plugins/devops/skills/my-requirements/scripts/**)",
+      "Bash(node list_my_requirements.js)"
     ]
   }
 }
