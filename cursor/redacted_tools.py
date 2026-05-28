@@ -61,6 +61,9 @@ from typing import Any, Dict, List, Optional, Tuple
 _PIPE = "\uff5c"   # ｜  FULLWIDTH VERTICAL LINE
 _UBAR = "\u2581"   # ▁  LOWER ONE EIGHTH BLOCK (used by DeepSeek as `_`)
 
+# Marker for [Tool Call: Name({...})] blocks (composer-2.5 / Claude Code format).
+_TOOL_CALL_PREFIX = "[Tool Call:"
+
 TOOL_CALLS_BEGIN = f"<{_PIPE}tool{_UBAR}calls{_UBAR}begin{_PIPE}>"
 TOOL_CALLS_END = f"<{_PIPE}tool{_UBAR}calls{_UBAR}end{_PIPE}>"
 TOOL_CALL_BEGIN = f"<{_PIPE}tool{_UBAR}call{_UBAR}begin{_PIPE}>"
@@ -554,8 +557,7 @@ def extract_redacted_tool_calls(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     return cleaned, tools
 
 
-# Marker that may indicate the start of a [Tool Call: ...] block.
-_TOOL_CALL_PREFIX = "[Tool Call:"
+
 
 
 class RedactedToolStreamProcessor:
