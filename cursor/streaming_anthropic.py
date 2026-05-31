@@ -17,8 +17,9 @@ from cursor.streaming_core import (
     stream_with_first_token_retry,
 )
 from cursor.thinking_split import CursorThinkingSplitter
-from cursor.redacted_tools import RedactedToolStreamProcessor, extract_redacted_tool_calls
+from cursor.redacted_tools import RedactedToolStreamProcessor, extract_redacted_tool_calls, scrub_leaked_tool_markup
 from cursor.bracket_tools import BracketToolCallProcessor, extract_bracket_tool_calls
+from cursor.yaml_tools import YamlToolCallProcessor, extract_yaml_tool_calls
 from cursor.tokenizer import count_tokens, count_message_tokens
 from cursor.tool_args import normalize_tool_arguments
 from cursor.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES, SUPPRESS_THINKING_MODELS
@@ -66,6 +67,7 @@ async def stream_cursor_to_anthropic(
     tool_blocks: List[Dict[str, Any]] = []
     thinking_splitter = CursorThinkingSplitter()
     redacted_processor = RedactedToolStreamProcessor()
+    yaml_processor = YamlToolCallProcessor()
     bracket_processor = BracketToolCallProcessor()
     suppress_thinking = any(marker in model for marker in SUPPRESS_THINKING_MODELS)
     if suppress_thinking:
@@ -177,6 +179,8 @@ async def stream_cursor_to_anthropic(
 
         * DeepSeek native tokens (``<｜tool▁call▁begin｜>...``) handled by
           ``RedactedToolStreamProcessor``.
+        * YAML-style ``[Tool call: Name\\n  key: value]`` handled by
+          ``YamlToolCallProcessor``.
         * Markdown-ish ``[Tool Call: Name({...})]`` handled by
           ``BracketToolCallProcessor``.
 
@@ -184,10 +188,15 @@ async def stream_cursor_to_anthropic(
         promoted to a structured ``tool_use`` block.
         """
         text_part, tools = redacted_processor.feed(text)
+        text_part, yaml_tools = yaml_processor.feed(text_part)
         text_part, bracket_tools = bracket_processor.feed(text_part)
+        text_part = scrub_leaked_tool_markup(text_part)
         async for chunk in _emit_text_delta(text_part):
             yield chunk
         for tool in tools:
+            async for chunk in _emit_tool_use(tool):
+                yield chunk
+        for tool in yaml_tools:
             async for chunk in _emit_tool_use(tool):
                 yield chunk
         for tool in bracket_tools:
@@ -252,13 +261,18 @@ async def stream_cursor_to_anthropic(
             yield chunk
 
         flush_text, flush_tools = redacted_processor.flush()
+        flush_text, flush_yaml_tools = yaml_processor.flush()
         flush_text, flush_bracket_tools = bracket_processor.feed(flush_text)
         final_text, final_bracket_tools = bracket_processor.flush()
         flush_text += final_text
         flush_bracket_tools.extend(final_bracket_tools)
+        flush_text = scrub_leaked_tool_markup(flush_text)
         async for chunk in _emit_text_delta(flush_text):
             yield chunk
         for tool in flush_tools:
+            async for chunk in _emit_tool_use(tool):
+                yield chunk
+        for tool in flush_yaml_tools:
             async for chunk in _emit_tool_use(tool):
                 yield chunk
         for tool in flush_bracket_tools:
@@ -338,8 +352,11 @@ async def collect_anthropic_response(
 
         full_content, redacted_tools = extract_redacted_tool_calls(full_content)
         tool_calls.extend(redacted_tools)
+        full_content, yaml_tools = extract_yaml_tool_calls(full_content)
+        tool_calls.extend(yaml_tools)
         full_content, bracket_tools = extract_bracket_tool_calls(full_content)
         tool_calls.extend(bracket_tools)
+        full_content = scrub_leaked_tool_markup(full_content, trim=True)
     finally:
         try:
             await response.aclose()

@@ -70,11 +70,37 @@ TOOL_CALL_BEGIN = f"<{_PIPE}tool{_UBAR}call{_UBAR}begin{_PIPE}>"
 TOOL_CALL_END = f"<{_PIPE}tool{_UBAR}call{_UBAR}end{_PIPE}>"
 TOOL_ARG_SEP = f"<{_PIPE}tool{_UBAR}sep{_PIPE}>"
 
+# ASCII-pipe redacted markers (composer-2.5 mimic of Claude Code tool markup).
+ASCII_TOOL_CALLS_BEGIN = "<｜tool▁calls▁begin｜>"
+ASCII_TOOL_CALLS_END = "<｜tool▁calls▁end｜>"
+ASCII_TOOL_CALL_BEGIN = "<｜tool▁call▁begin｜>"
+ASCII_TOOL_CALL_END = "<｜tool▁call▁end｜>"
+ASCII_TOOL_ARG_SEP = "<｜tool▁sep｜>"
+
+# Strip leaked markup that should never reach the client as visible text.
+_LEAKED_MARKUP_RE = re.compile(
+    r"</think>"
+    r"|<\|redacted_tool_[a-z_]*\|>"
+    r"|\[Tool result\][^\n]*",
+    re.IGNORECASE,
+)
+
 # Sorted longest-first so the streaming holdback prefers the most specific
 # marker when chunks land mid-token.
 _MARKER_PREFIXES: Tuple[str, ...] = tuple(
     sorted(
-        {TOOL_CALLS_BEGIN, TOOL_CALLS_END, TOOL_CALL_BEGIN, TOOL_CALL_END, TOOL_ARG_SEP},
+        {
+            TOOL_CALLS_BEGIN,
+            TOOL_CALLS_END,
+            TOOL_CALL_BEGIN,
+            TOOL_CALL_END,
+            TOOL_ARG_SEP,
+            ASCII_TOOL_CALLS_BEGIN,
+            ASCII_TOOL_CALLS_END,
+            ASCII_TOOL_CALL_BEGIN,
+            ASCII_TOOL_CALL_END,
+            ASCII_TOOL_ARG_SEP,
+        },
         key=len,
         reverse=True,
     )
@@ -325,7 +351,7 @@ def _try_parse_simple_json(stripped: str) -> Optional[ParsedToolCall]:
     return ParsedToolCall(name=name, arguments=args)
 
 
-def _parse_key_value_body(stripped: str) -> ParsedToolCall:
+def _parse_key_value_body(stripped: str, sep: str = TOOL_ARG_SEP) -> ParsedToolCall:
     """
     Parse the Cursor passthrough key/value body shape.
 
@@ -345,10 +371,10 @@ def _parse_key_value_body(stripped: str) -> ParsedToolCall:
         arguments. Unknown / malformed sections are skipped rather than
         raising so partial corruption never tanks the whole response.
     """
-    if TOOL_ARG_SEP not in stripped:
+    if sep not in stripped:
         return ParsedToolCall(name=stripped.split("\n", 1)[0].strip(), arguments={})
 
-    segments = stripped.split(TOOL_ARG_SEP)
+    segments = stripped.split(sep)
     name = segments[0].strip()
     arguments: Dict[str, Any] = {}
 
@@ -391,29 +417,109 @@ def _parse_single_tool_call(body: str) -> ParsedToolCall:
     return _parse_key_value_body(stripped)
 
 
-def _parse_tool_calls_block(block: str) -> List[ParsedToolCall]:
+def _parse_tool_calls_block(
+    block: str,
+    call_begin: str = TOOL_CALL_BEGIN,
+    call_end: str = TOOL_CALL_END,
+    arg_sep: str = TOOL_ARG_SEP,
+) -> List[ParsedToolCall]:
     """Parse every tool call inside a single ``tool_calls`` envelope."""
     tools: List[ParsedToolCall] = []
     search_from = 0
 
     while True:
-        begin_idx = block.find(TOOL_CALL_BEGIN, search_from)
+        begin_idx = block.find(call_begin, search_from)
         if begin_idx == -1:
             break
 
-        body_start = begin_idx + len(TOOL_CALL_BEGIN)
-        end_idx = block.find(TOOL_CALL_END, body_start)
+        body_start = begin_idx + len(call_begin)
+        end_idx = block.find(call_end, body_start)
         if end_idx == -1:
             break
 
         body = block[body_start:end_idx]
-        parsed = _parse_single_tool_call(body)
-        if parsed.name:
-            tools.append(parsed)
+        stripped = body.strip()
+        if not stripped:
+            search_from = end_idx + len(call_end)
+            continue
 
-        search_from = end_idx + len(TOOL_CALL_END)
+        for parser in (_try_parse_typed_json, _try_parse_simple_json):
+            parsed = parser(stripped)
+            if parsed is not None:
+                tools.append(parsed)
+                break
+        else:
+            parsed = _parse_key_value_body(stripped, sep=arg_sep)
+            if parsed.name:
+                tools.append(parsed)
+
+        search_from = end_idx + len(call_end)
 
     return tools
+
+
+def scrub_leaked_tool_markup(text: str, *, trim: bool = False) -> str:
+    """
+    Remove orphan tool markup tokens from visible assistant text.
+
+    Args:
+        text: Visible text that may contain incomplete tool envelopes.
+        trim: When ``True``, strip leading/trailing whitespace and collapse
+            excessive blank lines. Use only for batch extraction at end of
+            stream — never for per-chunk streaming scrubbing.
+
+    Returns:
+        Text with known leak patterns stripped.
+    """
+    if not text:
+        return ""
+    cleaned = _LEAKED_MARKUP_RE.sub("", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    if trim:
+        cleaned = cleaned.strip()
+    return cleaned
+
+
+def _extract_marker_block(
+    text: str,
+    begin: str,
+    end: str,
+    call_begin: str,
+    call_end: str,
+    arg_sep: str,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Extract one family of redacted-tool-call envelopes from ``text``."""
+    if begin not in text:
+        return text, []
+
+    cleaned_parts: List[str] = []
+    tools: List[Dict[str, Any]] = []
+    remainder = text
+
+    while begin in remainder:
+        begin_idx = remainder.find(begin)
+        if begin_idx > 0:
+            cleaned_parts.append(remainder[:begin_idx])
+
+        remainder = remainder[begin_idx + len(begin) :]
+        end_idx = remainder.rfind(end)
+        if end_idx == -1:
+            cleaned_parts.append(begin + remainder)
+            remainder = ""
+            break
+
+        block = remainder[:end_idx]
+        remainder = remainder[end_idx + len(end) :]
+
+        for parsed in _parse_tool_calls_block(
+            block, call_begin=call_begin, call_end=call_end, arg_sep=arg_sep
+        ):
+            tools.append({"name": parsed.name, "arguments": parsed.arguments})
+
+    if remainder:
+        cleaned_parts.append(remainder)
+
+    return "".join(cleaned_parts), tools
 
 
 # Regex to extract [Tool Call: Name({...})] blocks from composable model output.
@@ -519,11 +625,22 @@ def extract_redacted_tool_calls(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     # Phase 1: extract [Tool Call: xxx({...})] blocks (Claude Code / composer-2.5 format)
     text, claude_code_tools = _extract_claude_code_tool_calls(text)
 
-    # Phase 2: extract <｜tool▁calls▁begin｜>... blocks (DeepSeek format)
+    # Phase 2: ASCII-pipe redacted envelopes (composer mimic)
+    text, ascii_tools = _extract_marker_block(
+        text,
+        ASCII_TOOL_CALLS_BEGIN,
+        ASCII_TOOL_CALLS_END,
+        ASCII_TOOL_CALL_BEGIN,
+        ASCII_TOOL_CALL_END,
+        ASCII_TOOL_ARG_SEP,
+    )
+
+    # Phase 3: DeepSeek fullwidth redacted envelopes
     if TOOL_CALLS_BEGIN not in text:
-        if claude_code_tools:
-            return text, claude_code_tools
-        return text, []
+        all_tools = claude_code_tools + ascii_tools
+        if all_tools:
+            return scrub_leaked_tool_markup(text, trim=True), all_tools
+        return scrub_leaked_tool_markup(text, trim=True), []
 
     cleaned_parts: List[str] = []
     tools: List[Dict[str, Any]] = []
@@ -553,8 +670,8 @@ def extract_redacted_tool_calls(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     if remainder:
         cleaned_parts.append(remainder)
 
-    cleaned = "".join(cleaned_parts)
-    return cleaned, tools
+    cleaned = scrub_leaked_tool_markup("".join(cleaned_parts), trim=True)
+    return cleaned, claude_code_tools + ascii_tools + tools
 
 
 
@@ -605,7 +722,22 @@ class RedactedToolStreamProcessor:
             text_out.extend(text_parts)
         tools_out.extend(cc_tools)
 
-        # Phase 2: handle <｜tool▁calls▁begin｜> blocks (DeepSeek format)
+        # Phase 2: handle ASCII redacted envelopes (composer mimic)
+        while ASCII_TOOL_CALLS_BEGIN in self._buffer:
+            begin_idx = self._buffer.find(ASCII_TOOL_CALLS_BEGIN)
+            prefix = self._buffer[:begin_idx]
+            if prefix:
+                text_out.append(prefix)
+            self._buffer = self._buffer[begin_idx:]
+            end_idx = self._buffer.find(ASCII_TOOL_CALLS_END)
+            if end_idx == -1:
+                break
+            segment = self._buffer[: end_idx + len(ASCII_TOOL_CALLS_END)]
+            self._buffer = self._buffer[end_idx + len(ASCII_TOOL_CALLS_END) :]
+            _, parsed = extract_redacted_tool_calls(segment)
+            tools_out.extend(parsed)
+
+        # Phase 3: handle DeepSeek fullwidth redacted envelopes
         while TOOL_CALLS_BEGIN in self._buffer:
             begin_idx = self._buffer.find(TOOL_CALLS_BEGIN)
             prefix = self._buffer[:begin_idx]
@@ -630,14 +762,14 @@ class RedactedToolStreamProcessor:
             _, parsed = extract_redacted_tool_calls(segment)
             tools_out.extend(parsed)
 
-        # Phase 3: hold back partial markers from the buffer tail.
+        # Phase 4: hold back partial markers from the buffer tail.
         #
-        # Three cases to handle:
+        # Cases to handle:
         # 1. Partial [Tool Call: prefix → CC-aware holdback
-        # 2. Partial DeepSeek marker (<｜tool...) at tail → DS holdback
-        # 3. TOOL_CALLS_BEGIN present but TOOL_CALLS_END absent → hold everything
-        if (TOOL_CALLS_BEGIN in self._buffer and
-                TOOL_CALLS_END not in self._buffer):
+        # 2. Partial DeepSeek / ASCII marker at tail → holdback
+        # 3. Envelope begin present but end absent → hold everything
+        if ((TOOL_CALLS_BEGIN in self._buffer and TOOL_CALLS_END not in self._buffer) or
+                (ASCII_TOOL_CALLS_BEGIN in self._buffer and ASCII_TOOL_CALLS_END not in self._buffer)):
             # Unterminated DeepSeek envelope — hold the entire buffer.
             # Don't emit anything.
             pass
@@ -673,4 +805,4 @@ class RedactedToolStreamProcessor:
         remaining = self._buffer
         self._buffer = ""
         cleaned, tools = extract_redacted_tool_calls(remaining)
-        return cleaned, tools
+        return scrub_leaked_tool_markup(cleaned), tools
