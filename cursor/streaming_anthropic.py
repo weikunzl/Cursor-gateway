@@ -20,6 +20,7 @@ from cursor.thinking_split import CursorThinkingSplitter
 from cursor.redacted_tools import RedactedToolStreamProcessor, extract_redacted_tool_calls
 from cursor.bracket_tools import BracketToolCallProcessor, extract_bracket_tool_calls
 from cursor.tokenizer import count_tokens, count_message_tokens
+from cursor.tool_args import normalize_tool_arguments
 from cursor.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES, SUPPRESS_THINKING_MODELS
 
 if TYPE_CHECKING:
@@ -90,12 +91,7 @@ async def stream_cursor_to_anthropic(
 
         tool_id = f"toolu_{uuid.uuid4().hex[:24]}"
         tool_name = tool.get("name", "")
-        tool_input = tool.get("arguments", {})
-        if isinstance(tool_input, str):
-            try:
-                tool_input = json.loads(tool_input)
-            except json.JSONDecodeError:
-                tool_input = {}
+        tool_input = normalize_tool_arguments(tool_name, tool.get("arguments", {}))
 
         yield _format_sse_event("content_block_start", {
             "type": "content_block_start",
@@ -361,16 +357,12 @@ async def collect_anthropic_response(
         content_blocks.append({"type": "text", "text": full_content})
 
     for tc in tool_calls:
-        tool_input = tc.get("arguments", {})
-        if isinstance(tool_input, str):
-            try:
-                tool_input = json.loads(tool_input)
-            except json.JSONDecodeError:
-                tool_input = {}
+        tool_name = tc.get("name", "")
+        tool_input = normalize_tool_arguments(tool_name, tc.get("arguments", {}))
         content_blocks.append({
             "type": "tool_use",
             "id": f"toolu_{uuid.uuid4().hex[:24]}",
-            "name": tc.get("name", ""),
+            "name": tool_name,
             "input": tool_input,
         })
 
