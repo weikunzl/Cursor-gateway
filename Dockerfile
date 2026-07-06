@@ -1,40 +1,31 @@
-# Kiro Gateway - Docker Image
-# Optimized single-stage build
+# Cursor Gateway - Docker Image (OrbStack / Docker compatible)
 
 FROM python:3.10-slim
 
-# Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    CURSOR_SERVER_HOST=0.0.0.0 \
+    CURSOR_SERVER_PORT=8001
 
-# Create non-root user for security
-RUN groupadd -r kiro && useradd -r -g kiro kiro
+RUN groupadd -r cursor && useradd -r -g cursor cursor
 
-# Set working directory
 WORKDIR /app
 
-# Install dependencies first (better layer caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY --chown=kiro:kiro . .
+COPY --chown=cursor:cursor cursor/ cursor/
+COPY --chown=cursor:cursor main.py .
 
-# Create directory for debug logs with proper permissions
-RUN mkdir -p debug_logs && chown -R kiro:kiro debug_logs
+RUN mkdir -p debug_logs && chown -R cursor:cursor debug_logs
 
-# Switch to non-root user
-USER kiro
+USER cursor
 
-# Expose port
-EXPOSE 8000
+EXPOSE 8001
 
-# Health check
-# Using httpx (our main HTTP library) instead of requests
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8000/health', timeout=5)"
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import httpx; httpx.get('http://localhost:8001/health', timeout=5)"
 
-# Run the application
 CMD ["python", "main.py"]

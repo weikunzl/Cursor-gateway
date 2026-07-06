@@ -1,12 +1,12 @@
-# AGENTS.md - Kiro Gateway Agent Guide
+# AGENTS.md - Cursor Gateway Agent Guide
 
-This is the short, always-read guide for agents working in Kiro Gateway. Keep it concise; put expanded guidance in `docs/agents/` and link it from here.
+This is the short, always-read guide for agents working in Cursor Gateway. Keep it concise; put expanded guidance in `docs/agents/` and link it from here.
 
 ## Project Context
 
-Kiro Gateway is a Python 3.10+ FastAPI proxy that provides OpenAI-compatible and Anthropic-compatible APIs for Kiro, Amazon Q Developer, and AWS CodeWhisperer.
+Cursor Gateway is a Python 3.10+ FastAPI proxy that provides OpenAI-compatible and Anthropic-compatible APIs for the Cursor API.
 
-It translates request/response formats, handles authentication, streaming, model resolution, retries, debug logging, and user-friendly error classification.
+It translates request/response formats, handles authentication from Cursor's local database, streaming, model resolution, retries, and user-friendly error classification.
 
 Core identity: the gateway is a transparent proxy with minimal, purposeful modifications.
 
@@ -52,11 +52,34 @@ The gateway must not:
 ## Project Structure
 
 ```text
-kiro-gateway/
+cursor-gateway/
 ├── main.py
-├── kiro/                 # routes, converters, streaming, auth, HTTP, models
-├── tests/                # unit, integration, shared fixtures
-├── docs/agents/          # expanded agent references
+├── cursor/
+│   ├── auth.py
+│   ├── cache.py
+│   ├── config.py
+│   ├── converters_core.py
+│   ├── converters_openai.py
+│   ├── converters_anthropic.py
+│   ├── http_client.py
+│   ├── model_resolver.py
+│   ├── models_openai.py
+│   ├── models_anthropic.py
+│   ├── parsers.py
+│   ├── routes_openai.py
+│   ├── routes_anthropic.py
+│   ├── streaming_core.py
+│   ├── streaming_openai.py
+│   ├── streaming_anthropic.py
+│   ├── thinking_split.py
+│   ├── bracket_tools.py
+│   ├── yaml_tools.py
+│   └── tool_args.py
+├── tests/
+│   ├── conftest.py
+│   └── unit/
+├── docs/agents/
+├── scripts/
 ├── .env.example
 ├── requirements.txt
 └── pytest.ini
@@ -67,10 +90,10 @@ kiro-gateway/
 The codebase is layered:
 
 1. Routes: FastAPI endpoints, auth checks, request validation.
-2. Converters: OpenAI/Anthropic requests to Kiro payloads.
-3. Streaming: Kiro/AWS event streams to OpenAI/Anthropic SSE.
+2. Converters: OpenAI/Anthropic requests to Cursor ConnectRPC payloads.
+3. Streaming: Cursor event streams to OpenAI/Anthropic SSE.
 4. Core services: auth, HTTP client, model resolution, caching.
-5. Parsers: AWS stream parsing and thinking block extraction.
+5. Parsers: stream parsing, thinking blocks, tool-call extraction.
 6. Models: Pydantic schemas.
 
 Important invariants:
@@ -78,7 +101,7 @@ Important invariants:
 - use per-request `httpx.AsyncClient` instances for streaming.
 - use shared clients only for non-streaming connection pooling.
 - keep OpenAI and Anthropic adapters thin over shared converter logic.
-- pass unknown model names through to Kiro after normalization/cache checks.
+- pass unknown model names through after alias/normalization checks.
 
 See `docs/agents/architecture.md`.
 
@@ -88,7 +111,6 @@ See `docs/agents/architecture.md`.
 - Use Google-style docstrings for public functions and non-trivial helpers.
 - Use loguru for logging.
 - Use async I/O for request-path network and file operations.
-- Use focused modules and existing local helpers before adding new abstractions.
 - Avoid bare `except:` and avoid broad exception handling without context.
 - Keep user-facing errors actionable and sanitized.
 
@@ -96,82 +118,37 @@ See `docs/agents/development.md`.
 
 ## Testing Standards
 
-All behavior changes require tests. Tests should cover happy paths, malformed inputs, edge cases, upstream quirks, and error paths.
-
-Network isolation is mandatory. Tests must mock external services; real network calls are blocked by `tests/conftest.py`.
-
-Useful commands:
+All behavior changes require tests. Network isolation is mandatory; `tests/conftest.py` blocks real httpx calls.
 
 ```bash
 pytest tests/unit/test_<module>.py -v
 pytest -v
-pytest --cov=kiro --cov-report=html
 ```
 
 ## Operations Summary
 
-Common commands:
-
 ```bash
 pip install -r requirements.txt
 python main.py
-python main.py --port 9000
-uvicorn main:app --host 0.0.0.0 --port 8000
+./scripts/cursor-gateway.sh start
 docker-compose up -d
 ```
 
-Core endpoints:
-
-- `GET /`
-- `GET /health`
-- `GET /v1/models`
-- `POST /v1/chat/completions`
-- `POST /v1/messages`
+Core endpoints: `GET /health`, `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/messages`.
 
 See `docs/agents/operations.md`.
 
-## Security and Performance
-
-- Never log credentials, tokens, API keys, passwords, or raw authorization headers.
-- Treat debug logs as sensitive.
-- Validate inputs with Pydantic.
-- Use HTTPS in production.
-- Stream large responses instead of buffering them.
-- Cache model metadata where appropriate.
-- Avoid unnecessary deep copies and JSON round-trips on hot paths.
-
-See `docs/agents/troubleshooting-security.md`.
-
-## Debugging Workflow
-
-For vague upstream errors such as `Improperly formed request`:
-
-1. Reproduce with the smallest failing request.
-2. Enable `DEBUG_MODE="errors"` when useful.
-3. Compare converter output with a passing request.
-4. Identify the specific API-level incompatibility.
-5. Add a regression test.
-6. Fix only the compatibility issue.
-
-Do not infer user intent from vague upstream validation errors.
-
 ## Collaboration Workflow
 
-When making changes:
-
-1. Read the relevant code and reference docs first.
-2. Check existing patterns before designing new ones.
-3. Keep edits scoped to the requested behavior.
-4. Add or update tests for behavior changes.
-5. Run focused tests, then broader tests when shared behavior changed.
-6. Check for lint/type issues when available.
-7. Do not commit or push unless explicitly asked.
-
-If the working tree is dirty, preserve user changes. Never revert unrelated edits without explicit permission.
+1. Read relevant code and reference docs first.
+2. Keep edits scoped to the requested behavior.
+3. Add or update tests for behavior changes.
+4. Run focused tests, then broader tests when shared behavior changed.
+5. Do not commit or push unless explicitly asked.
 
 ## Git Notes
 
-Before any requested commit, inspect status, diff, and recent log. Follow the repository's existing commit style:
+Follow existing commit style:
 
 ```text
 <type>(<scope>): <description>

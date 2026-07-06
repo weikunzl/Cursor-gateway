@@ -1,7 +1,0 @@
-# Cursor Gateway dependencies
-fastapi
-uvicorn[standard]
-httpx[http2]
-loguru
-python-dotenv
-tiktoken

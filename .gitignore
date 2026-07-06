@@ -30,6 +30,8 @@ debug*.json
 # Project-specific
 _notes/
 requests/
+.cursor-gateway.native.pid
+cursor-gateway.native.log
 
 # Testing
 .pytest_cache/

@@ -11,8 +11,6 @@ from pathlib import Path
 from typing import Dict, List
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=".env.cursor")
-# Also try default .env as fallback
 load_dotenv()
 
 # ==================================================================================================
@@ -22,7 +20,7 @@ load_dotenv()
 DEFAULT_SERVER_HOST: str = "0.0.0.0"
 SERVER_HOST: str = os.getenv("CURSOR_SERVER_HOST", os.getenv("SERVER_HOST", DEFAULT_SERVER_HOST))
 
-DEFAULT_SERVER_PORT: int = 8001  # Different from Kiro's 8000
+DEFAULT_SERVER_PORT: int = 8001
 SERVER_PORT: int = int(os.getenv("CURSOR_SERVER_PORT", os.getenv("SERVER_PORT", str(DEFAULT_SERVER_PORT))))
 
 # ==================================================================================================
@@ -36,7 +34,7 @@ if PROXY_API_KEY == _DEFAULT_PROXY_API_KEY:
     import warnings
     warnings.warn(
         "PROXY_API_KEY is using the insecure default value. "
-        "Set PROXY_API_KEY in .env.cursor for production use.",
+        "Set PROXY_API_KEY in .env for production use.",
         stacklevel=2,
     )
 

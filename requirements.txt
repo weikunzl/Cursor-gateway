@@ -1,12 +1,9 @@
-# Prod dependencies
+# Cursor Gateway dependencies
 fastapi
 uvicorn[standard]
 httpx[http2]
 loguru
 python-dotenv
 tiktoken
-
-# Testing dependencies
 pytest
 pytest-asyncio
-hypothesis
